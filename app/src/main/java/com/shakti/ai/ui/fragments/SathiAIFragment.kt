@@ -22,8 +22,6 @@ import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
 import com.shakti.ai.R
 import com.shakti.ai.viewmodel.SathiViewModel
 import kotlinx.coroutines.launch
@@ -37,11 +35,10 @@ import java.util.*
  */
 class SathiAIFragment : Fragment() {
 
-    // Use ViewModel - NO direct GeminiService calls
+    // Use ViewModel for Gemini API integration
     private val viewModel: SathiViewModel by viewModels()
 
     private lateinit var sharedPreferences: SharedPreferences
-    private val gson = Gson()
 
     // UI Elements
     private lateinit var messageInput: EditText
@@ -162,17 +159,6 @@ class SathiAIFragment : Fragment() {
         emergencyButton.setOnClickListener {
             showEmergencyContacts()
         }
-
-        // Tab switching
-        view?.findViewById<TextView>(R.id.tab_ai_companion)?.setOnClickListener {
-            switchTab(it as TextView)
-        }
-        view?.findViewById<TextView>(R.id.tab_mental_health)?.setOnClickListener {
-            switchTab(it as TextView)
-        }
-        view?.findViewById<TextView>(R.id.tab_support_resources)?.setOnClickListener {
-            switchTab(it as TextView)
-        }
     }
 
     private fun setupRecyclerView() {
@@ -180,6 +166,8 @@ class SathiAIFragment : Fragment() {
         chatRecyclerView.apply {
             layoutManager = LinearLayoutManager(context)
             adapter = chatAdapter
+            // Ensure recycler view doesn't interfere with parent scrolling
+            isNestedScrollingEnabled = true
         }
     }
 
@@ -217,6 +205,8 @@ class SathiAIFragment : Fragment() {
                 val anxiety = 100 - mood
                 anxietyProgress.progress = anxiety
                 anxietyScore.text = "$anxiety%"
+
+                saveData()
             }
         }
 
@@ -225,6 +215,14 @@ class SathiAIFragment : Fragment() {
             viewModel.isLoading.collect { isLoading ->
                 sendButton.isEnabled = !isLoading
                 messageInput.isEnabled = !isLoading
+
+                if (isLoading) {
+                    sendButton.alpha = 0.5f
+                    messageInput.hint = "AI is thinking..."
+                } else {
+                    sendButton.alpha = 1.0f
+                    messageInput.hint = "Type your message..."
+                }
             }
         }
 
@@ -233,14 +231,11 @@ class SathiAIFragment : Fragment() {
             viewModel.isCrisisDetected.collect { isCrisis ->
                 if (isCrisis) {
                     emergencyButton.setBackgroundColor(
-                        resources.getColor(
-                            android.R.color.holo_red_light,
-                            null
-                        )
+                        resources.getColor(android.R.color.holo_red_light, null)
                     )
                     Toast.makeText(
                         context,
-                        "Crisis detected. Emergency resources available.",
+                        "⚠️ Crisis detected. Emergency resources available.",
                         Toast.LENGTH_LONG
                     ).show()
                 }
@@ -274,7 +269,7 @@ class SathiAIFragment : Fragment() {
         if (message.isNotEmpty()) {
             messageInput.text.clear()
 
-            // Call ViewModel instead of GeminiService directly
+            // Call ViewModel with Gemini API integration
             val moodRating = moodProgress.progress / 10
             viewModel.sendMessageToSathi(message, moodRating)
 
@@ -282,6 +277,8 @@ class SathiAIFragment : Fragment() {
             val count = conversationCount.text.toString().toIntOrNull() ?: 0
             conversationCount.text = (count + 1).toString()
             saveData()
+        } else {
+            Toast.makeText(context, "Please enter a message", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -325,7 +322,9 @@ class SathiAIFragment : Fragment() {
 
             isRecording = true
             voiceButton.text = "⏹️ Stop Recording"
-            voiceButton.setBackgroundColor(resources.getColor(android.R.color.holo_red_light, null))
+            voiceButton.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                resources.getColor(android.R.color.holo_red_light, null)
+            )
             Toast.makeText(context, "🎤 Recording started...", Toast.LENGTH_SHORT).show()
         } catch (e: IOException) {
             Toast.makeText(context, "Failed to start recording: ${e.message}", Toast.LENGTH_SHORT)
@@ -342,7 +341,9 @@ class SathiAIFragment : Fragment() {
             mediaRecorder = null
             isRecording = false
             voiceButton.text = "🎤 Voice Message"
-            voiceButton.setBackgroundColor(resources.getColor(R.color.primary, null))
+            voiceButton.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                resources.getColor(R.color.sathi_color, null)
+            )
 
             Toast.makeText(context, "✅ Recording saved!", Toast.LENGTH_SHORT).show()
 
@@ -356,7 +357,7 @@ class SathiAIFragment : Fragment() {
 
     private fun openMediaPicker() {
         val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
-        intent.type = "image/* video/*"
+        intent.type = "image/*"
         pickMediaLauncher.launch(intent)
     }
 
@@ -365,7 +366,10 @@ class SathiAIFragment : Fragment() {
             .show()
 
         // Send media upload indicator via ViewModel
-        viewModel.sendMessageToSathi("📎 Media uploaded: ${uri.lastPathSegment}", 5)
+        viewModel.sendMessageToSathi(
+            "📎 Shared an image. Can you help me understand my feelings about it?",
+            5
+        )
     }
 
     private fun startBreathingExercise() {
@@ -385,11 +389,23 @@ class SathiAIFragment : Fragment() {
             """.trimIndent()
             )
             .setPositiveButton("Start") { _, _ ->
-                // Send via ViewModel instead of direct Gemini call
+                // Send via ViewModel - Gemini API integration
                 viewModel.sendMessageToSathi(
-                    "I'm doing a breathing exercise. Give me a short encouraging message.",
-                    5
+                    "I just completed a breathing exercise. How can this help me manage my stress better?",
+                    6
                 )
+
+                // Slightly improve mood
+                val currentMood = moodProgress.progress
+                val newMood = minOf(100, currentMood + 5)
+                moodProgress.progress = newMood
+                moodScore.text = "$newMood%"
+
+                val newAnxiety = 100 - newMood
+                anxietyProgress.progress = newAnxiety
+                anxietyScore.text = "$newAnxiety%"
+
+                saveData()
             }
             .setNegativeButton("Cancel", null)
             .create()
@@ -408,9 +424,9 @@ class SathiAIFragment : Fragment() {
             .setPositiveButton("Save") { _, _ ->
                 val gratitude = input.text.toString()
                 if (gratitude.isNotEmpty()) {
-                    // Send via ViewModel instead of direct Gemini call
+                    // Send via ViewModel - Gemini API integration
                     viewModel.sendMessageToSathi(
-                        "I'm grateful for: $gratitude. Acknowledge this and encourage me.",
+                        "I'm grateful for: $gratitude. Can you help me understand why gratitude is important?",
                         7
                     )
 
@@ -446,9 +462,9 @@ class SathiAIFragment : Fragment() {
                 val selectedGroup = groups[which]
                 Toast.makeText(context, "✅ Joined: $selectedGroup", Toast.LENGTH_SHORT).show()
 
-                // Send via ViewModel instead of direct Gemini call
+                // Send via ViewModel - Gemini API integration
                 viewModel.sendMessageToSathi(
-                    "I just joined a support group: $selectedGroup. Encourage me about this decision.",
+                    "I just joined a support group: $selectedGroup. What should I expect and how can it help me?",
                     6
                 )
             }
@@ -472,7 +488,10 @@ class SathiAIFragment : Fragment() {
             Vandrevala Foundation: 1860-2662-345
             (24/7 Mental Health Support)
             
-            If you're having thoughts of self-harm, please call these numbers immediately. Your life matters.
+            iCall: 9152987821
+            (Psychosocial Helpline - English/Hindi)
+            
+            If you're having thoughts of self-harm, please call these numbers immediately. Your life matters. 💜
         """.trimIndent()
 
         android.app.AlertDialog.Builder(requireContext())
@@ -484,32 +503,14 @@ class SathiAIFragment : Fragment() {
                 }
                 startActivity(intent)
             }
+            .setNeutralButton("Call Women Helpline") { _, _ ->
+                val intent = Intent(Intent.ACTION_DIAL).apply {
+                    data = Uri.parse("tel:1091")
+                }
+                startActivity(intent)
+            }
             .setNegativeButton("Close", null)
             .show()
-    }
-
-    private fun switchTab(selectedTab: TextView) {
-        // Reset all tabs
-        view?.findViewById<TextView>(R.id.tab_ai_companion)?.apply {
-            setBackgroundColor(resources.getColor(android.R.color.transparent, null))
-            setTextColor(resources.getColor(R.color.text_secondary, null))
-        }
-        view?.findViewById<TextView>(R.id.tab_mental_health)?.apply {
-            setBackgroundColor(resources.getColor(android.R.color.transparent, null))
-            setTextColor(resources.getColor(R.color.text_secondary, null))
-        }
-        view?.findViewById<TextView>(R.id.tab_support_resources)?.apply {
-            setBackgroundColor(resources.getColor(android.R.color.transparent, null))
-            setTextColor(resources.getColor(R.color.text_secondary, null))
-        }
-
-        // Highlight selected tab
-        selectedTab.apply {
-            setBackgroundColor(resources.getColor(R.color.primary_light, null))
-            setTextColor(resources.getColor(R.color.text_primary, null))
-        }
-
-        Toast.makeText(context, "Switched to ${selectedTab.text}", Toast.LENGTH_SHORT).show()
     }
 
     override fun onPause() {
@@ -551,23 +552,25 @@ class SathiAIFragment : Fragment() {
                 }
                 radius = 16f
                 cardElevation = 4f
+                isClickable = true
+                isFocusable = true
 
                 val layout = LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(32, 24, 32, 24)
+                    setPadding(24, 20, 24, 20)
 
                     addView(TextView(context).apply {
                         id = android.R.id.text1
-                        textSize = 15f
+                        textSize = 14f
                         setTextColor(resources.getColor(R.color.text_primary, null))
                         setLineSpacing(4f, 1.1f)
                     })
 
                     addView(TextView(context).apply {
                         id = android.R.id.text2
-                        textSize = 11f
+                        textSize = 10f
                         setTextColor(resources.getColor(R.color.text_secondary, null))
-                        setPadding(0, 12, 0, 0)
+                        setPadding(0, 8, 0, 0)
                     })
                 }
 
@@ -584,11 +587,13 @@ class SathiAIFragment : Fragment() {
 
             // Different styling for user and AI messages
             if (message.isUser) {
-                holder.card.setCardBackgroundColor(resources.getColor(R.color.primary_light, null))
-                holder.messageText.setTextColor(resources.getColor(R.color.text_primary, null))
+                holder.card.setCardBackgroundColor(resources.getColor(R.color.sathi_color, null))
+                holder.messageText.setTextColor(resources.getColor(R.color.white, null))
+                holder.timeText.setTextColor(resources.getColor(R.color.white, null))
             } else {
-                holder.card.setCardBackgroundColor(resources.getColor(android.R.color.white, null))
+                holder.card.setCardBackgroundColor(resources.getColor(R.color.white, null))
                 holder.messageText.setTextColor(resources.getColor(R.color.text_primary, null))
+                holder.timeText.setTextColor(resources.getColor(R.color.text_secondary, null))
             }
         }
 
