@@ -248,7 +248,7 @@ class AptosBlockchainManager private constructor(private val context: Context) {
                 val body = response.body?.string()
                 if (body != null) {
                     val ledger = json.decodeFromString<LedgerInfo>(body)
-                    return@withContext ledger.blockHeight.toLongOrNull() ?: 0L
+                    return@withContext ledger.block_height.toLongOrNull() ?: 0L
                 }
             }
         } catch (e: Exception) {

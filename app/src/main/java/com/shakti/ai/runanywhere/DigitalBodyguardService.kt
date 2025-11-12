@@ -199,7 +199,10 @@ class DigitalBodyguardService : Service(), SensorEventListener {
         
         // Start threat fusion loop
         startThreatDetectionLoop()
-        
+
+        // Start blockchain queue processor
+        startBlockchainQueueProcessor()
+
         // Update notification
         updateNotification(true)
         
@@ -620,8 +623,38 @@ class DigitalBodyguardService : Service(), SensorEventListener {
      * Anchor evidence to Aptos blockchain
      */
     private suspend fun anchorEvidenceToBlockchain(evidence: EvidencePackage) {
-        // TODO: Implement blockchain anchoring
-        Log.i(TAG, "Evidence queued for blockchain anchoring: ${evidence.evidenceHash}")
+        try {
+            val blockchainManager = AptosBlockchainManager.getInstance(this)
+
+            // Check if blockchain is accessible
+            val isAccessible = blockchainManager.isBlockchainAccessible()
+
+            if (isAccessible) {
+                Log.i(TAG, "Anchoring evidence to blockchain: ${evidence.evidenceHash}")
+
+                // Anchor the evidence
+                val result = blockchainManager.anchorEvidence(evidence)
+
+                if (result.success) {
+                    Log.i(TAG, "✓ Evidence successfully anchored to blockchain")
+                    Log.i(TAG, "  Transaction Hash: ${result.txHash}")
+                    Log.i(TAG, "  Block Height: ${result.blockHeight}")
+                    Log.i(TAG, "  Evidence ID: ${evidence.evidenceId}")
+
+                    // The evidence is now immutably recorded on blockchain
+                    // Transaction can be verified at: https://explorer.aptoslabs.com/txn/${result.txHash}
+                } else {
+                    Log.w(TAG, "Failed to anchor evidence: ${result.error}")
+                    Log.i(TAG, "Evidence queued for retry by AptosBlockchainManager")
+                }
+            } else {
+                Log.w(TAG, "Blockchain not accessible, evidence will be queued for later anchoring")
+                // Try to anchor anyway - AptosBlockchainManager will queue it automatically
+                blockchainManager.anchorEvidence(evidence)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error anchoring evidence to blockchain", e)
+        }
     }
 
     /**
@@ -834,4 +867,45 @@ class DigitalBodyguardService : Service(), SensorEventListener {
         audioModelInterpreter?.close()
         serviceScope.cancel()
     }
+
+    /**
+     * Start blockchain queue processor
+     */
+    private fun startBlockchainQueueProcessor() {
+        serviceScope.launch {
+            while (_monitoringState.value.isActive) {
+                try {
+                    val blockchainManager =
+                        AptosBlockchainManager.getInstance(this@DigitalBodyguardService)
+
+                    // Check if blockchain is accessible
+                    val isAccessible = blockchainManager.isBlockchainAccessible()
+
+                    if (isAccessible) {
+                        // Process any queued evidence
+                        blockchainManager.processQueue()
+
+                        // Get queue status
+                        val queueStatus = blockchainManager.getQueueStatus()
+                        if (queueStatus.totalQueued > 0) {
+                            Log.i(
+                                TAG,
+                                "Blockchain queue: ${queueStatus.totalQueued} items, ${queueStatus.failedRetries} failed"
+                            )
+                        }
+                    } else {
+                        Log.d(TAG, "Blockchain not accessible, skipping queue processing")
+                    }
+
+                    // Run every 2 minutes when online, 5 minutes when offline
+                    delay(if (isAccessible) 120000 else 300000)
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "Blockchain queue processor error", e)
+                    delay(300000) // Wait 5 minutes on error
+                }
+            }
+        }
+    }
+
 }

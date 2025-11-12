@@ -121,6 +121,7 @@ data class EvidencePackage(
     val encryptionKey: ByteArray? = null,
     val evidenceHash: String = "",
     val blockchainTxHash: String? = null,
+    val blockHeight: Long? = null,
     val isEncrypted: Boolean = false,
     val isAnchoredOnChain: Boolean = false
 ) {
