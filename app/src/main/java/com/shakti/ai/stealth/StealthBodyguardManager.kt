@@ -582,19 +582,13 @@ class StealthBodyguardManager(private val context: Context) : SensorEventListene
             val rms = sqrt(rmsSum / length).toFloat()
             val zcr = zeroCrossings.toFloat() / length
 
-            // Speech characteristics:
-            // - RMS above noise floor (> 2000)
-            // - ZCR in speech range (0.05 - 0.15)
-            // - Peak amplitude indicating voice (> 8000)
+            // Calculate peak amplitude
+            val peak = peakAmplitude.toFloat()
 
-            val isLoudEnough = rms > 3000f  // RAISED significantly - must be loud
-            val hasVoicePattern = zcr > 0.05f && zcr < 0.20f  // Narrower range - more specific
-            val hasSpeechAmplitude = peakAmplitude > 8000  // RAISED - must be clear speech
-
-            // Detect short bursts characteristic of "HELP" (one syllable)
+            // Detect bursts (any loud sound)
             var burstCount = 0
             var inBurst = false
-            val burstThreshold = 10000  // RAISED from 7000
+            val burstThreshold = 5000  // Moderate threshold - clear sounds only
 
             for (i in 0 until length) {
                 val abs = kotlin.math.abs(buffer[i].toInt())
@@ -608,36 +602,70 @@ class StealthBodyguardManager(private val context: Context) : SensorEventListene
                 }
             }
 
-            // "HELP" is one syllable, so we expect 1-2 bursts in the audio frame
-            val hasHelpPattern = burstCount >= 1 && burstCount <= 3  // More restrictive
+            // Calculate energy distribution (HELP has specific pattern)
+            var highEnergyCount = 0
+            var lowEnergyCount = 0
+            val highEnergyThreshold =
+                6000  // "H" and "P" sounds - more sensitive for slow/quiet speech
+            val lowEnergyThreshold = 3000
 
-            // Combined confidence based on multiple factors - STRICT (prevent false positives)
-            val voiceConfidence = when {
-                isLoudEnough && hasVoicePattern && hasSpeechAmplitude && hasHelpPattern -> 0.75f
-                isLoudEnough && hasVoicePattern && hasSpeechAmplitude -> 0.60f
-                isLoudEnough && hasVoicePattern -> 0.45f
-                else -> 0.0f  // All other cases = 0 confidence
+            for (i in 0 until length) {
+                val abs = kotlin.math.abs(buffer[i].toInt())
+                if (abs > highEnergyThreshold) {
+                    highEnergyCount++
+                } else if (abs < lowEnergyThreshold) {
+                    lowEnergyCount++
+                }
             }
 
-            val isTriggered = voiceConfidence > 0.55f  // RAISED significantly from 0.40f
+            val highEnergyRatio = highEnergyCount.toFloat() / length
+            val energyVariance = if (highEnergyCount > 0 && lowEnergyCount > 0) {
+                kotlin.math.abs(highEnergyCount - lowEnergyCount).toFloat() / length
+            } else {
+                0f
+            }
 
-            // Log detailed info when speech is detected
-            if (voiceConfidence > 0.30f) {  // Only log significant detections
+            // "HELP" specific characteristics - MORE SENSITIVE (works with slow/quiet speech):
+            // 1. Single syllable (1 burst only - not 2, not 3, not 4)
+            // 2. High peak at start (H) and end (P) = high energy variance
+            // 3. Wide ZCR (0.08-0.20) - accepts slower speech
+            // 4. Strong consonants = high peak amplitude (lower threshold)
+            // 5. Quieter speaking volume accepted
+
+            val isSingleSyllable = burstCount == 1  // EXACTLY 1 burst (HELP is one syllable)
+            val hasHelpZCR = zcr in 0.08f..0.20f  // Wider range - accepts slower speech
+            val hasStrongConsonants =
+                peak > 5500f && highEnergyRatio > 0.13f  // Lower thresholds - quieter speech works
+            val hasEnergyVariance = energyVariance > 0.09f  // Lower threshold - easier to achieve
+            val isLoudEnough = rms > 1700f  // Much lower - quiet speech accepted
+
+            // Calculate confidence - MUST meet HELP-specific criteria
+            var confidence = 0f
+            if (isSingleSyllable) confidence += 0.35f  // Critical: HELP is ONE syllable
+            if (hasHelpZCR) confidence += 0.25f  // HELP-specific ZCR range
+            if (hasStrongConsonants) confidence += 0.20f  // H and P consonants
+            if (hasEnergyVariance) confidence += 0.10f  // Energy pattern of HELP
+            if (isLoudEnough) confidence += 0.10f  // Clear voice
+
+            // More sensitive threshold - easier to trigger
+            val isHelp = confidence >= 0.60f  // Need at least 60% (3 out of 5 conditions)
+
+            // Log all voice activity for debugging
+            if (rms > 1800f) {
                 Log.d(
-                    TAG, "Voice analysis: RMS=${rms.toInt()}, ZCR=${"%.3f".format(zcr)}, " +
-                            "Peak=$peakAmplitude, Bursts=$burstCount, Confidence=${
-                                "%.2f".format(
-                                    voiceConfidence
-                                )
-                            } ${if (isTriggered) "✅ TRIGGERED" else ""}"
+                    TAG, "Voice: RMS=${rms.toInt()}, ZCR=${"%.3f".format(zcr)}, " +
+                            "Peak=$peakAmplitude, Bursts=$burstCount, " +
+                            "HighEnergy=${"%.2f".format(highEnergyRatio)}, " +
+                            "Variance=${"%.2f".format(energyVariance)}, " +
+                            "Conf=${"%.2f".format(confidence)} ${if (isHelp) "✅ HELP!" else "❌"}"
                 )
             }
 
             return VoiceTriggerResult(
-                confidence = voiceConfidence,
-                isTriggered = isTriggered,
-                keyword = if (isTriggered) "HELP" else "",
-                weight = if (isTriggered) 1.0f else 0f
+                confidence = confidence,
+                isTriggered = isHelp,
+                keyword = if (isHelp) "HELP" else "",
+                weight = if (isHelp) 1.0f else 0f
             )
 
         } catch (e: Exception) {
@@ -897,7 +925,7 @@ class StealthBodyguardManager(private val context: Context) : SensorEventListene
     }
 
     /**
-     * Start video recording with invisible 1x1 SurfaceTexture in background (audio+video)
+     * Start video recording with proper resolution in background (stealth mode)
      */
     private fun startEvidenceVideoRecording() {
         if (isVideoRecording) {
@@ -926,41 +954,71 @@ class StealthBodyguardManager(private val context: Context) : SensorEventListene
             // Open camera
             camera = Camera.open()
             val params = camera?.parameters
-            // Use lowest resolution (for stealth, can optimize for quality as needed)
+            
+            // Use a PROPER resolution (not 1x1 - that causes 0 byte files!)
             val supportedSizes = params?.supportedVideoSizes ?: params?.supportedPreviewSizes
+            // Get the smallest supported size (for efficiency, but still valid)
             val size = supportedSizes?.minByOrNull { it.width * it.height }
-            size?.let { params?.setPreviewSize(it.width, it.height) }
+                ?: supportedSizes?.firstOrNull()
+
+            if (size == null) {
+                Log.e(TAG, "No supported video sizes available")
+                stopEvidenceVideoRecording()
+                return
+            }
+            
+            Log.i(TAG, "Using video size: ${size.width}x${size.height}")
+            
+            params?.setPreviewSize(size.width, size.height)
             camera?.parameters = params
 
-            // Create 1x1 surface texture
+            // Create surface texture with PROPER size (not 1x1!)
             val surfaceTexture = SurfaceTexture(42)
-            surfaceTexture.setDefaultBufferSize(1, 1)
+            surfaceTexture.setDefaultBufferSize(size.width, size.height)
             camera?.setPreviewTexture(surfaceTexture)
             camera?.startPreview()
 
             videoSurface = Surface(surfaceTexture)
 
+            // Configure MediaRecorder properly
             evidenceVideoRecorder = MediaRecorder().apply {
                 setCamera(camera)
-                setAudioSource(MediaRecorder.AudioSource.MIC)
+                
+                // Set sources BEFORE output format
+                setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
                 setVideoSource(MediaRecorder.VideoSource.CAMERA)
+                
+                // Set output format
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                
+                // Set encoders AFTER output format
                 setVideoEncoder(MediaRecorder.VideoEncoder.H264)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setVideoEncodingBitRate(1024 * 1024)
-                setVideoFrameRate(20)
-                size?.let {
-                    setVideoSize(it.width, it.height)
-                } ?: setVideoSize(640, 480) // fallback
+                
+                // Set encoding parameters
+                setVideoEncodingBitRate(512 * 1024) // 512 kbps (lower for small resolution)
+                setVideoFrameRate(15) // 15 fps (lower for efficiency)
+                setVideoSize(size.width, size.height)
+                setAudioEncodingBitRate(64000) // 64 kbps audio
+                setAudioSamplingRate(44100)
+                
+                // Set output file
                 setOutputFile(videoFile.absolutePath)
+                
+                // Set preview display
                 setPreviewDisplay(videoSurface)
+                
+                // Set max duration and file size (5 minutes max)
+                setMaxDuration(300000) // 5 minutes in milliseconds
+                setMaxFileSize(100 * 1024 * 1024) // 100 MB max
 
-                // Add stealth: No visible UI, 1x1 pixel surface
                 prepare()
                 start()
             }
+            
             isVideoRecording = true
             Log.i(TAG, "✓ Evidence video recording started: ${videoFile.absolutePath}")
+            Log.i(TAG, "  Resolution: ${size.width}x${size.height}, 15fps, 512kbps")
 
         } catch (e: IOException) {
             Log.e(TAG, "Error starting evidence video recording (IO)", e)

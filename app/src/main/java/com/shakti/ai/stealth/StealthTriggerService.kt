@@ -51,13 +51,14 @@ class StealthTriggerService : Service() {
         private const val SAMPLE_RATE = 16000
         private const val BUFFER_SIZE = 4096
         private const val AUDIO_FRAME_MS = 100
-        
-        // Detection thresholds
-        private const val LOUD_NOISE_THRESHOLD = 25000 // Amplitude threshold for loud noise
+
+        // Detection thresholds - MORE SENSITIVE (works with slow/quiet speech)
+        private const val LOUD_NOISE_THRESHOLD = 16000 // More sensitive - louder clear noise
         private const val HELP_COUNT_THRESHOLD = 2     // "HELP" must be said 2 times
         private const val HELP_TIMEOUT_MS = 8000L      // 8 seconds between HELPs
-        private const val LOUD_BURST_THRESHOLD = 15000 // Threshold for detecting speech bursts
-        private const val MIN_RMS_FOR_SPEECH = 6000    // Minimum RMS for speech detection (RAISED)
+        private const val LOUD_BURST_THRESHOLD = 5000  // Burst detection threshold
+        private const val MIN_RMS_FOR_SPEECH =
+            1700    // Much more sensitive - quiet speech accepted
         
         // Actions
         const val ACTION_START_MONITORING = "com.shakti.ai.stealth.START_MONITORING"
@@ -299,16 +300,10 @@ class StealthTriggerService : Service() {
             return false // Too quiet
         }
 
-        // Speech characteristics:
-        // - ZCR in speech range (0.03 - 0.25)
-        // - Peak amplitude indicating voice (> 10000)
-        val hasVoicePattern = zcr > 0.05f && zcr < 0.20f  // More specific range
-        val hasSpeechAmplitude = peakAmplitude > 10000  // RAISED from 7000 - must be loud
-
-        // Detect short bursts characteristic of "HELP" (one syllable)
+        // Detect bursts (single syllable characteristic of "HELP")
         var burstCount = 0
         var inBurst = false
-        val burstThreshold = 12000  // RAISED from 9000
+        val burstThreshold = LOUD_BURST_THRESHOLD
 
         for (i in 0 until length) {
             val abs = kotlin.math.abs(buffer[i].toInt())
@@ -322,14 +317,46 @@ class StealthTriggerService : Service() {
             }
         }
 
-        // "HELP" is one syllable, so we expect 1-3 bursts in the audio frame
-        val hasHelpPattern = burstCount >= 1 && burstCount <= 3  // More restrictive
+        // Calculate energy distribution (HELP has specific pattern)
+        var highEnergyCount = 0
+        var lowEnergyCount = 0
+        val highEnergyThreshold = 6000  // "H" and "P" sounds are high energy - more sensitive
+        val lowEnergyThreshold = 3000
 
-        // Combined detection: ALL 3 conditions required (stricter)
-        val isSpeechLike =
-            hasVoicePattern && hasSpeechAmplitude && hasHelpPattern && rms > MIN_RMS_FOR_SPEECH
+        for (i in 0 until length) {
+            val abs = kotlin.math.abs(buffer[i].toInt())
+            if (abs > highEnergyThreshold) {
+                highEnergyCount++
+            } else if (abs < lowEnergyThreshold) {
+                lowEnergyCount++
+            }
+        }
 
-        if (isSpeechLike) {
+        val highEnergyRatio = highEnergyCount.toFloat() / length
+        val energyVariance = if (highEnergyCount > 0 && lowEnergyCount > 0) {
+            kotlin.math.abs(highEnergyCount - lowEnergyCount).toFloat() / length
+        } else {
+            0f
+        }
+
+        // "HELP" specific characteristics:
+        // 1. Single syllable (EXACTLY 1 burst)
+        // 2. Narrow ZCR range (0.08-0.20) - specific to HELP
+        // 3. Strong consonants (H and P) = high peak + high energy ratio
+        // 4. Energy variance (H...e...l...P pattern)
+        // 5. Clear speaking volume
+
+        val isSingleSyllable = burstCount == 1  // EXACTLY 1 burst
+        val hasHelpZCR = zcr in 0.08f..0.20f  // Narrower, HELP-specific range
+        val hasStrongConsonants = peakAmplitude > 5500 && highEnergyRatio > 0.13f  // H and P
+        val hasEnergyVariance = energyVariance > 0.09f  // HELP's energy pattern
+        val isLoudEnough = rms > MIN_RMS_FOR_SPEECH
+
+        // ALL HELP-specific conditions must be met (strict matching)
+        val isHelpPattern = isSingleSyllable && hasHelpZCR && hasStrongConsonants &&
+                hasEnergyVariance && isLoudEnough
+
+        if (isHelpPattern) {
             val currentTime = System.currentTimeMillis()
             
             // Reset counter if timeout exceeded
@@ -344,7 +371,7 @@ class StealthTriggerService : Service() {
 
             Log.i(
                 TAG,
-                "🗣️ Speech detected (RMS: ${rms.toInt()}, ZCR: ${"%.3f".format(zcr)}, Peak: $peakAmplitude, Bursts: $burstCount): HELP count = $helpCount/$HELP_COUNT_THRESHOLD"
+                "🗣️ Speech detected (RMS: ${rms.toInt()}, ZCR: ${"%.3f".format(zcr)}, Peak: $peakAmplitude, Bursts: $burstCount, High Energy Ratio: $highEnergyRatio, Energy Variance: $energyVariance): HELP count = $helpCount/$HELP_COUNT_THRESHOLD"
             )
 
             // Update notification with progress
@@ -359,7 +386,7 @@ class StealthTriggerService : Service() {
             // Log when we detect sound but it's not speech-like
             Log.d(
                 TAG,
-                "Sound detected but not speech-like (RMS: ${rms.toInt()}, ZCR: ${"%.3f".format(zcr)}, Peak: $peakAmplitude, Bursts: $burstCount)"
+                "Sound detected but not speech-like (RMS: ${rms.toInt()}, ZCR: ${"%.3f".format(zcr)}, Peak: $peakAmplitude, Bursts: $burstCount, High Energy Ratio: $highEnergyRatio, Energy Variance: $energyVariance)"
             )
         }
         
